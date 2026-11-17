@@ -1,0 +1,17 @@
+# =====================================================================
+# BTL Xử lý ảnh (INT13146) - PTIT
+# Đề tài: Khôi phục và nâng cao chất lượng ảnh cũ (restore_app)
+# =====================================================================
+# Cài đặt nhanh: pip install -r requirements.txt
+
+# --- Thuật toán tự code từ đầu (Code From Scratch) ---
+numpy>=1.24.0
+
+# --- Thư viện đối chứng nghiệm thu (KHÔNG dùng trong nhân core) ---
+opencv-python>=4.8.0
+
+# --- Giao diện Desktop ---
+PySide6>=6.5.0
+
+# --- Đọc/ghi hình ảnh an toàn ---
+Pillow>=10.0.0

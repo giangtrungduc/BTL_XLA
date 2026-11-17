@@ -1,0 +1,29 @@
+# Môi trường ảo Python (BẮT BUỘC bỏ qua)
+.venv/
+venv/
+env/
+ENV/
+
+# Bytecode Python & Bộ nhớ đệm
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Tệp sinh ra khi chạy và kiểm thử
+.pytest_cache/
+*.log
+scratch/
+scratch_test/
+
+# Tệp hệ điều hành
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Cấu hình IDE cá nhân
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
