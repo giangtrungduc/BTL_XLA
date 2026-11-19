@@ -21,7 +21,9 @@ def simulate_old_photo(
     noise_level: float = 0.02,
     gamma_val: float = 1.25,
     num_scratches: int = 5,
-    seed: int = 42
+    seed: int = 42,
+    fade: float = 0.0,
+    fade_level: float = 190.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Tạo ảnh cũ giả lập từ ảnh gốc sạch.
@@ -33,6 +35,8 @@ def simulate_old_photo(
         gamma_val: Hệ số làm bạc màu / giảm tương phản (gamma > 1).
         num_scratches: Số lượng vết xước mô phỏng.
         seed: Hạt giống ngẫu nhiên.
+        fade: Mức bạc màu 0..1: g = (1 - fade) * f + fade * fade_level
+              (ảnh in lâu năm bị nhạt và mất tương phản, dải xám co về quanh fade_level).
         
     Trả về:
         degraded: Ảnh sau khi làm cũ.
@@ -44,7 +48,10 @@ def simulate_old_photo(
     h, w = clean_image.shape[:2]
     img = clean_image.copy()
     
-    # 1. Giảm tương phản / bạc màu hóa bằng Gamma
+    # 1. Bạc màu: co dải xám về quanh fade_level, rồi chỉnh gamma (nếu có)
+    if fade > 0.0:
+        faded = (1.0 - fade) * img.astype(np.float32) + fade * fade_level
+        img = np.clip(np.round(faded), 0, 255).astype(np.uint8)
     if gamma_val != 1.0:
         img = gamma_transform(img, gamma=gamma_val)
         
@@ -64,7 +71,8 @@ def simulate_old_photo(
         end_y = np.random.randint(h // 2, h - 10)
         
         # Tạo đường đi hơi cong/gãy khúc
-        num_pts = max(10, int(np.hypot(end_x - start_x, end_y - start_y) // 2))
+        # Lấy mẫu dày (>= 1 điểm mỗi hàng) để vết xước liền mạch, không bị đứt quãng
+        num_pts = max(10, int(np.hypot(end_x - start_x, end_y - start_y) * 1.5))
         ys = np.linspace(start_y, end_y, num_pts).astype(int)
         xs = np.linspace(start_x, end_x, num_pts) + np.random.normal(0, 1.2, num_pts)
         xs = np.clip(np.round(xs), 0, w - 1).astype(int)

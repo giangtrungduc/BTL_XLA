@@ -9,7 +9,7 @@ Bao gồm:
   3. Chế độ kết hợp nâng cao bài giảng (Laplacian + Sobel + Smooth + Mask + Gamma) - Ch.6 tr.58-60
 """
 import numpy as np
-from core.window import get_sliding_windows
+from core.window import convolve2d
 from core.denoise import arithmetic_mean_filter
 from core.intensity import gamma_transform
 
@@ -54,8 +54,7 @@ def compute_laplacian(image: np.ndarray, mode: str = "8-neighbor", pad_mode: str
     kernel = LAPLACIAN_8_NEIGHBOR if "8" in mode else LAPLACIAN_4_NEIGHBOR
 
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32), 3, pad_mode)
-        return np.sum(win * kernel, axis=(-2, -1))
+        return convolve2d(ch, kernel, pad_mode)
 
     if image.ndim == 2:
         return _op(image)
@@ -87,9 +86,8 @@ def sobel_filter(image: np.ndarray, pad_mode: str = "mirror") -> np.ndarray:
     M = |Gx| + |Gy|.
     """
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32), 3, pad_mode)
-        gx = np.sum(win * SOBEL_X, axis=(-2, -1))
-        gy = np.sum(win * SOBEL_Y, axis=(-2, -1))
+        gx = convolve2d(ch, SOBEL_X, pad_mode)
+        gy = convolve2d(ch, SOBEL_Y, pad_mode)
         mag = np.abs(gx) + np.abs(gy)
         return mag
 
@@ -103,41 +101,35 @@ def sobel_filter(image: np.ndarray, pad_mode: str = "mirror") -> np.ndarray:
 
 
 def combined_sharpen(
-    image: np.ndarray, 
-    k_lap: float = 0.4, 
-    gamma_val: float = 0.85
+    image: np.ndarray,
+    k_lap: float = 0.6,
+    gamma_val: float = 1.0
 ) -> np.ndarray:
     """
-    Quy trình làm sắc nét kết hợp kinh điển (Chương 6, slide 58-60):
-    1. Ảnh gốc f
-    2. Laplacian của f -> f_lap = f - k * nabla^2 f
-    3. Gradient Sobel của f -> M
-    4. Làm mịn Sobel bằng bộ lọc trung bình 5x5 -> M_smooth
-    5. Tạo mặt nạ: mask = (f_lap * M_smooth) chuẩn hóa
-    6. Cộng với ảnh gốc: f_sharpened = f + mask
-    7. Áp dụng biến đổi Gamma để cân bằng dải xám
+    Làm nét kết hợp Laplacian + Sobel (ý tưởng của Chương 6, slide 58-60):
+      1. Tính Laplacian L = nabla^2 f (chi tiết bậc hai: viền và cả nhiễu).
+      2. Tính độ lớn gradient Sobel M = |Gx| + |Gy| (mạnh ở biên, yếu ở vùng phẳng).
+      3. Làm mịn M bằng lọc trung bình 5x5 rồi chuẩn hóa về [0, 1] -> mặt nạ W.
+         W gần 1 tại biên thật, gần 0 tại vùng phẳng có nhiễu hạt.
+      4. g = f - k * (W * L): chỉ làm nét ở nơi có biên, không khuếch đại nhiễu vùng phẳng.
+      5. (Tùy chọn) biến đổi Gamma để chỉnh lại dải xám.
+
+    So với Laplacian thuần (g = f - k * L), cách này ít làm nổi hạt nhiễu hơn,
+    phù hợp với ảnh cũ vốn còn sót nhiễu sau bước khử nhiễu.
     """
     img_f = image.astype(np.float32)
-    
-    # 1. Laplacian
     lap = compute_laplacian(image, mode="8-neighbor")
-    f_lap = img_f - k_lap * lap
-    
-    # 2. Sobel
-    sobel_mag = sobel_filter(image).astype(np.float32)
-    
-    # 3. Làm mịn Sobel 5x5
-    sobel_smooth = arithmetic_mean_filter(np.clip(sobel_mag, 0, 255).astype(np.uint8), kernel_size=5).astype(np.float32)
-    
-    # 4. Nhân mặt nạ (chuẩn hóa tỷ lệ [0, 1])
-    norm_sobel = sobel_smooth / (np.max(sobel_smooth) + 1e-6)
-    mask = (f_lap - img_f) * norm_sobel
-    
-    # 5. Cộng ảnh gốc
-    f_sharp = np.clip(np.round(img_f + mask), 0, 255).astype(np.uint8)
-    
-    # 6. Biến đổi Gamma
+
+    sobel_mag = sobel_filter(image)  # uint8, đã cắt về [0, 255]
+    sobel_smooth = arithmetic_mean_filter(sobel_mag, kernel_size=5).astype(np.float32)
+    if sobel_smooth.ndim == 3:
+        # Dùng chung một mặt nạ cho cả 3 kênh để không lệch màu
+        sobel_smooth = np.mean(sobel_smooth, axis=-1, keepdims=True)
+    weight = sobel_smooth / (np.max(sobel_smooth) + 1e-6)
+
+    sharpened = img_f - k_lap * weight * lap
+    out = np.clip(np.round(sharpened), 0, 255).astype(np.uint8)
+
     if gamma_val != 1.0:
-        f_sharp = gamma_transform(f_sharp, gamma=gamma_val)
-        
-    return f_sharp
+        out = gamma_transform(out, gamma=gamma_val)
+    return out

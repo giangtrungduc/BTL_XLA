@@ -1,99 +1,81 @@
 """
 Module ui/histogram_widget.py
-Widget hiển thị biểu đồ phân bố mức xám Histogram tinh gọn bằng QPainter.
-Khớp hoàn hảo với phong cách thiết kế trong ảnh mock-up.
+Vẽ histogram mức xám bằng QPainter (64 cột), kèm mean / std và vạch phân vị 1% - 99%.
 """
 import numpy as np
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRectF
 
 from core.histogram import compute_histogram, compute_stats
 
 
 class HistogramWidget(QWidget):
-    """Widget vẽ biểu đồ cột tần suất Histogram."""
-    
-    def __init__(self, title: str = "Histogram", bar_color: QColor = QColor(26, 86, 160), parent=None):
+    def __init__(self, title: str = "Histogram", bar_color: QColor = QColor(37, 99, 235), parent=None):
         super().__init__(parent)
         self.title = title
         self.bar_color = bar_color
-        self.hist_data = np.zeros(256, dtype=int)
+        self.hist = np.zeros(256, dtype=np.int64)
         self.mean_val = 0.0
         self.std_val = 0.0
-        self.setMinimumHeight(110)
-        self.setMaximumHeight(140)
-        
-    def set_image(self, image: np.ndarray):
-        """Cập nhật dữ liệu từ ảnh mới."""
+        self.p1 = None
+        self.p99 = None
+        self.setMinimumHeight(96)
+        self.setMaximumHeight(120)
+
+    def set_image(self, image):
         if image is None or image.size == 0:
-            self.hist_data = np.zeros(256, dtype=int)
-            self.mean_val = 0.0
-            self.std_val = 0.0
+            self.hist = np.zeros(256, dtype=np.int64)
+            self.mean_val = self.std_val = 0.0
+            self.p1 = self.p99 = None
         else:
             h, _ = compute_histogram(image)
-            self.hist_data = h
+            self.hist = h
             self.mean_val, self.std_val = compute_stats(image)
+            cdf = np.cumsum(h) / max(1, h.sum())
+            self.p1 = int(np.searchsorted(cdf, 0.01))
+            self.p99 = int(np.searchsorted(cdf, 0.99))
         self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        w = self.width()
-        h = self.height()
-        
-        # 1. Tiêu đề và thông số
-        font_title = QFont("Segoe UI", 9)
-        painter.setFont(font_title)
-        painter.setPen(QColor(80, 90, 105))
-        painter.drawText(6, 16, self.title)
-        
-        if np.max(self.hist_data) > 0:
-            stat_str = f"Mean: {self.mean_val:.1f} | Std: {self.std_val:.1f}"
-            font_stat = QFont("Consolas", 8)
-            painter.setFont(font_stat)
-            painter.setPen(QColor(120, 130, 145))
-            txt_w = painter.fontMetrics().horizontalAdvance(stat_str)
-            painter.drawText(w - txt_w - 6, 16, stat_str)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
 
-        # 2. Khu vực vẽ các cột Histogram
-        chart_top = 26
-        chart_bottom = h - 18
-        chart_h = max(10, chart_bottom - chart_top)
-        chart_left = 6
-        chart_right = w - 6
-        chart_w = max(10, chart_right - chart_left)
+        p.setFont(QFont("Segoe UI", 8))
+        p.setPen(QColor(100, 116, 139))
+        p.drawText(2, 12, self.title)
+        if self.hist.sum() > 0:
+            txt = f"mean {self.mean_val:.0f}   std {self.std_val:.0f}   dải 1–99%: {self.p1}–{self.p99}"
+            tw = p.fontMetrics().horizontalAdvance(txt)
+            p.drawText(w - tw - 2, 12, txt)
 
-        # Nhóm 256 bin thành 32 cột để hiển thị các thanh rộng, đẹp mắt như mock-up
-        num_bars = 32
-        bins_per_bar = 256 // num_bars
-        aggregated = np.zeros(num_bars, dtype=float)
-        for i in range(num_bars):
-            aggregated[i] = np.sum(self.hist_data[i * bins_per_bar : (i + 1) * bins_per_bar])
+        top, bottom, left, right = 20, h - 14, 2, w - 2
+        cw, ch = max(10, right - left), max(10, bottom - top)
 
-        max_val = np.max(aggregated) if np.max(aggregated) > 0 else 1.0
+        # Nền gradient đen -> trắng nhỏ dưới trục để thấy mức xám
+        for i in range(0, cw, 2):
+            g = int(255 * i / cw)
+            p.setPen(QColor(g, g, g))
+            p.drawLine(left + i, bottom + 3, left + i, bottom + 6)
 
-        bar_width = chart_w / float(num_bars)
-        gap = 2.0
-        actual_bar_w = max(1.0, bar_width - gap)
+        n_bars = 64
+        agg = self.hist.reshape(n_bars, -1).sum(axis=1).astype(float)
+        mx = agg.max() if agg.max() > 0 else 1.0
+        bw = cw / n_bars
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(self.bar_color))
+        for i, v in enumerate(agg):
+            bh = (v / mx) * ch
+            p.drawRect(QRectF(left + i * bw, bottom - bh, max(1.0, bw - 1), bh))
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(self.bar_color))
+        p.setPen(QPen(QColor(226, 232, 240), 1))
+        p.drawLine(left, bottom, right, bottom)
 
-        for i in range(num_bars):
-            val = aggregated[i]
-            bar_h = (val / max_val) * chart_h
-            bx = chart_left + i * bar_width
-            by = chart_bottom - bar_h
-            painter.drawRoundedRect(bx, by, actual_bar_w, bar_h, 1.5, 1.5)
-
-        # 3. Đường kẻ đáy và nhãn mức xám
-        painter.setPen(QPen(QColor(220, 226, 235), 1))
-        painter.drawLine(chart_left, chart_bottom, chart_right, chart_bottom)
-
-        painter.setFont(QFont("Consolas", 7))
-        painter.setPen(QColor(140, 150, 165))
-        painter.drawText(chart_left, h - 4, "0")
-        painter.drawText(chart_left + chart_w // 2 - 8, h - 4, "128")
-        painter.drawText(chart_right - 18, h - 4, "255")
+        if self.p1 is not None:
+            pen = QPen(QColor(220, 38, 38, 160), 1, Qt.DashLine)
+            p.setPen(pen)
+            for v in (self.p1, self.p99):
+                x = left + v / 255.0 * cw
+                p.drawLine(int(x), top, int(x), bottom)
+        p.end()

@@ -1,120 +1,116 @@
 """
 Module ui/image_pair.py
-Khung hiển thị trực quan 2 ảnh song song (Before / After) cùng 2 biểu đồ Histogram tương ứng.
-Khớp hoàn hảo với bố cục trong ảnh mock-up thiết kế.
+Thẻ hiển thị một ảnh kèm histogram. Thẻ kết quả có thêm hộp chọn "Hiển thị" để xem
+kết quả sau từng bước hoặc mặt nạ vết xước (rất tiện khi thuyết trình).
 """
 import numpy as np
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
-)
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QSizePolicy, QWidget
 from PySide6.QtGui import QPixmap, QImage, QColor
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from ui.histogram_widget import HistogramWidget
 
 
+def numpy_to_qpixmap(img: np.ndarray) -> QPixmap:
+    """Chuyển mảng uint8 (xám hoặc RGB) sang QPixmap (QImage.copy() để không phụ thuộc bộ nhớ numpy)."""
+    arr = np.ascontiguousarray(img)
+    h, w = arr.shape[:2]
+    if arr.ndim == 2:
+        q = QImage(arr.data, w, h, arr.strides[0], QImage.Format_Grayscale8).copy()
+    else:
+        q = QImage(arr.data, w, h, arr.strides[0], QImage.Format_RGB888).copy()
+    return QPixmap.fromImage(q)
+
+
 class ImageCard(QFrame):
-    """Khung thẻ hiển thị 1 ảnh cùng biểu đồ Histogram tương ứng."""
-    
+    """Thẻ ảnh + histogram."""
+    viewChanged = Signal(str)
+
     def __init__(self, title: str, is_result: bool = False, parent=None):
         super().__init__(parent)
+        self.setObjectName("card")
         self.is_result = is_result
-        self.current_image = None
-        
-        self.setStyleSheet("""
-            ImageCard {
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
-            }
-        """)
+        self._image = None
+        self._pixmap = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
 
-        # 1. Header thẻ
-        header = QHBoxLayout()
+        head_w = QWidget()
+        head_w.setFixedHeight(32)
+        head = QHBoxLayout(head_w)
+        head.setContentsMargins(0, 0, 0, 0)
         self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #1e293b;")
-        header.addWidget(self.lbl_title)
-        header.addStretch()
+        self.lbl_title.setObjectName("cardTitle")
+        head.addWidget(self.lbl_title)
+        head.addStretch()
+        self.lbl_info = QLabel("")
+        self.lbl_info.setObjectName("muted")
+        head.addWidget(self.lbl_info)
+        if is_result:
+            self.cbo_view = QComboBox()
+            self.cbo_view.setMinimumWidth(170)
+            self.cbo_view.addItem("Kết quả cuối", "final")
+            self.cbo_view.currentIndexChanged.connect(
+                lambda _: self.viewChanged.emit(self.cbo_view.currentData() or "final"))
+            head.addWidget(self.cbo_view)
+        lay.addWidget(head_w)
 
-        if self.is_result:
-            self.badge = QLabel("Chưa xử lý")
-            self.badge.setStyleSheet("""
-                background-color: #e0f2fe;
-                color: #0369a1;
-                border-radius: 10px;
-                padding: 2px 8px;
-                font-size: 10px;
-                font-weight: 500;
-            """)
-            header.addWidget(self.badge)
-        else:
-            self.lbl_info = QLabel("Chưa nạp ảnh")
-            self.lbl_info.setStyleSheet("color: #64748b; font-size: 10px; font-family: Consolas;")
-            header.addWidget(self.lbl_info)
+        self.view = QLabel("Chưa có ảnh\nBấm “Mở ảnh” hoặc “Ảnh mẫu”")
+        self.view.setObjectName("imageView")
+        self.view.setAlignment(Qt.AlignCenter)
+        self.view.setMinimumSize(240, 240)
+        self.view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        lay.addWidget(self.view, 1)
 
-        layout.addLayout(header)
+        color = QColor(37, 99, 235) if is_result else QColor(71, 85, 105)
+        self.hist = HistogramWidget("Histogram", color)
+        lay.addWidget(self.hist)
 
-        # 2. Khung Viewport hiển thị ảnh
-        self.img_view = QLabel()
-        self.img_view.setAlignment(Qt.AlignCenter)
-        self.img_view.setMinimumSize(220, 240)
-        self.img_view.setStyleSheet("""
-            background-color: #f1f5f9;
-            border: 1px dashed #cbd5e1;
-            border-radius: 6px;
-        """)
-        layout.addWidget(self.img_view, 1)
+    # ------------------------------------------------------------------
+    def set_view_options(self, options):
+        """options: danh sách (khóa, nhãn). Giữ lựa chọn hiện tại nếu vẫn còn."""
+        if not self.is_result:
+            return
+        current = self.cbo_view.currentData()
+        self.cbo_view.blockSignals(True)
+        self.cbo_view.clear()
+        for key, label in options:
+            self.cbo_view.addItem(label, key)
+        idx = self.cbo_view.findData(current)
+        self.cbo_view.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cbo_view.blockSignals(False)
 
-        # 3. Biểu đồ Histogram bên dưới
-        hist_title = "Histogram kết quả" if is_result else "Histogram gốc"
-        bar_color = QColor(14, 116, 144) if is_result else QColor(30, 64, 175)
-        self.hist_widget = HistogramWidget(title=hist_title, bar_color=bar_color)
-        layout.addWidget(self.hist_widget)
+    def current_view(self) -> str:
+        return (self.cbo_view.currentData() or "final") if self.is_result else "final"
 
-    def set_image(self, image: np.ndarray, info_text: str = None):
-        """Cập nhật ảnh hiển thị và cập nhật histogram."""
-        self.current_image = image
+    def set_info(self, text: str):
+        self.lbl_info.setText(text)
+
+    def set_image(self, image: np.ndarray, update_hist: bool = True):
+        self._image = image
         if image is None:
-            self.img_view.clear()
-            self.hist_widget.set_image(None)
+            self._pixmap = None
+            self.view.clear()
+            self.view.setText("Chưa có ảnh")
+            if update_hist:
+                self.hist.set_image(None)
             return
+        self._pixmap = numpy_to_qpixmap(image)
+        self._render()
+        if update_hist:
+            self.hist.set_image(image)
 
-        self._render_pixmap()
-        self.hist_widget.set_image(image)
-
-        if not self.is_result and info_text:
-            self.lbl_info.setText(info_text)
-
-    def set_badge_text(self, text: str):
-        """Cập nhật badge trạng thái các bước đã chạy."""
-        if self.is_result:
-            self.badge.setText(text)
-
-    def _render_pixmap(self):
-        if self.current_image is None:
+    def _render(self):
+        if self._pixmap is None:
             return
-
-        img_arr = np.ascontiguousarray(self.current_image)
-        h, w = img_arr.shape[:2]
-        
-        if img_arr.ndim == 2:
-            q_img = QImage(img_arr.data, w, h, w, QImage.Format_Grayscale8)
-        else:
-            q_img = QImage(img_arr.data, w, h, 3 * w, QImage.Format_RGB888)
-
-        pixmap = QPixmap.fromImage(q_img)
-        # Scale vừa vặn kích thước hiển thị mà giữ nguyên tỷ lệ khung hình
-        target_size = self.img_view.size()
-        if target_size.width() > 10 and target_size.height() > 10:
-            scaled = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.img_view.setPixmap(scaled)
-        else:
-            self.img_view.setPixmap(pixmap)
+        size = self.view.size()
+        if size.width() < 10 or size.height() < 10:
+            self.view.setPixmap(self._pixmap)
+            return
+        self.view.setPixmap(self._pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._render_pixmap()
+        self._render()

@@ -5,7 +5,7 @@ Theo Chương 0 tr.8 bài giảng Xử lý ảnh (INT13146 - PTIT):
 KHÔNG import cv2 trong package core.
 """
 from core.padding import pad_image
-from core.window import get_sliding_windows
+from core.window import get_sliding_windows, convolve2d
 from core.noise import add_gaussian_noise, add_uniform_noise, add_salt_and_pepper_noise
 from core.denoise import (
     median_filter, arithmetic_mean_filter, geometric_mean_filter,
@@ -14,23 +14,26 @@ from core.denoise import (
     gaussian_filter, create_gaussian_kernel
 )
 from core.intensity import (
-    gamma_transform, log_transform, negative_transform, piecewise_linear_transform
+    gamma_transform, log_transform, negative_transform, piecewise_linear_transform,
+    auto_contrast_stretch
 )
 from core.histogram import compute_histogram, compute_stats, equalize_histogram
 from core.color import rgb_to_hsi, hsi_to_rgb, process_color_on_intensity
 from core.sharpen import (
     compute_laplacian, laplacian_sharpen, sobel_filter, combined_sharpen
 )
-from core.morphology import dilate, erode, morph_open, morph_close, connected_components
+from core.morphology import dilate, erode, morph_open, morph_close, connected_components, label_components
 from core.scratch import otsu_threshold, detect_scratch_mask, fill_masked
 from core.metrics import calculate_rms_error, calculate_snr_ms, calculate_psnr
 from core.degrade import simulate_old_photo
-from core.pipeline import Stage, run_pipeline, diagnose
+from core.pipeline import Stage, run_pipeline, diagnose, diagnose_with_report, analyze_image
+from core.resize import block_downscale, downscale_factor
 
 __all__ = [
     # padding & window
     "pad_image",
     "get_sliding_windows",
+    "convolve2d",
     # noise
     "add_gaussian_noise",
     "add_uniform_noise",
@@ -53,6 +56,7 @@ __all__ = [
     "log_transform",
     "negative_transform",
     "piecewise_linear_transform",
+    "auto_contrast_stretch",
     # histogram
     "compute_histogram",
     "compute_stats",
@@ -72,6 +76,7 @@ __all__ = [
     "morph_open",
     "morph_close",
     "connected_components",
+    "label_components",
     # scratch
     "otsu_threshold",
     "detect_scratch_mask",
@@ -86,4 +91,9 @@ __all__ = [
     "Stage",
     "run_pipeline",
     "diagnose",
+    "diagnose_with_report",
+    "analyze_image",
+    # resize
+    "block_downscale",
+    "downscale_factor",
 ]

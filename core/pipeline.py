@@ -1,19 +1,24 @@
 """
 Module core/pipeline.py
-Quy trình khôi phục ảnh có thứ tự cố định và chẩn đoán tự động (Chương 0, 2, 3, 5, 6).
-Toàn bộ thuật toán được cài đặt trực tiếp bằng NumPy (Code from scratch).
+Quy trình khôi phục ảnh cũ có thứ tự cố định và chẩn đoán tự động (Chương 2, 3, 5, 6).
+Toàn bộ thuật toán được cài đặt bằng NumPy (code from scratch).
 
-NGUYÊN TẮC THIẾT KẾ:
-  1. Mỗi bước là một hàm thuần khiết: f(ảnh, tham số) -> ảnh mới.
-  2. run_pipeline() LUÔN nhận ảnh gốc ban đầu và thực hiện lại tuần tự từ đầu theo 4 bước cố định:
-        Khử nhiễu -> Vết xước -> Sáng & Tương phản -> Làm nét.
-     Lý do: Đạo hàm khuếch đại nhiễu (Ch.6 tr.29-31), nên bắt buộc phải làm mịn trước khi làm nét.
-  3. Cơ chế này loại bỏ hoàn toàn lỗi "dồn bước" (khi kéo slider không bị tích lũy kết quả cũ)
-     và không cần quản lý ngăn xếp Undo/Redo phức tạp.
-  4. Hỗ trợ cả ảnh màu (qua không gian HSI, chỉ xử lý kênh I theo Chương 3 tr.53).
+THỨ TỰ CỐ ĐỊNH 4 BƯỚC:
+    1. Vết xước  -> 2. Khử nhiễu -> 3. Sáng & tương phản -> 4. Làm nét
+
+Lý do thứ tự:
+  - Vết xước được phát hiện TRƯỚC khử nhiễu: lọc trung vị làm mờ/xóa một phần vết mảnh,
+    nếu phát hiện sau thì mặt nạ bắt nhầm vào biên thật của ảnh.
+  - Khử nhiễu trước tăng tương phản: kéo giãn histogram cũng kéo giãn biên độ nhiễu.
+  - Làm nét cuối cùng: đạo hàm khuếch đại nhiễu (Ch.6 tr.29-31), nên phải làm sạch trước.
+
+NGUYÊN TẮC:
+  - Mỗi bước là hàm thuần khiết f(ảnh, tham số) -> ảnh mới.
+  - run_pipeline() luôn chạy lại từ ẢNH GỐC, không cộng dồn kết quả cũ.
+  - Ảnh màu: tương phản xử lý trên kênh I của HSI (Ch.3 tr.53) để giữ sắc độ.
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import numpy as np
 
 from core.denoise import (
@@ -23,224 +28,344 @@ from core.denoise import (
     gaussian_filter
 )
 from core.scratch import detect_scratch_mask, fill_masked
-from core.intensity import gamma_transform, log_transform, negative_transform, piecewise_linear_transform
-from core.histogram import equalize_histogram, compute_stats
-from core.sharpen import laplacian_sharpen, sobel_filter, combined_sharpen
+from core.intensity import (
+    gamma_transform, log_transform, negative_transform, piecewise_linear_transform,
+    auto_contrast_stretch, percentile_range
+)
+from core.histogram import equalize_histogram
+from core.sharpen import laplacian_sharpen, combined_sharpen
 from core.color import process_color_on_intensity
+
+
+STAGE_ORDER = ["scratch", "denoise", "contrast", "sharpen"]
+
+STAGE_TITLES = {
+    "scratch": "Vết xước",
+    "denoise": "Khử nhiễu",
+    "contrast": "Sáng & tương phản",
+    "sharpen": "Làm nét",
+}
+
+# Khóa phương pháp chuẩn (giao diện truyền đúng các khóa này)
+DENOISE_METHODS = [
+    "median", "mean", "gaussian", "alpha_trimmed", "k_nearest", "geometric",
+    "harmonic", "contraharmonic", "midpoint", "max", "min",
+]
+CONTRAST_METHODS = ["stretch", "equalize", "gamma", "log", "negative"]
+SHARPEN_METHODS = ["combined", "laplacian_4", "laplacian_8"]
 
 
 @dataclass
 class Stage:
-    name: str          # 'denoise', 'scratch', 'contrast', 'sharpen'
+    name: str          # 'scratch', 'denoise', 'contrast', 'sharpen'
     enabled: bool = True
     method: str = "default"
     params: Dict[str, Any] = field(default_factory=dict)
 
 
-def run_pipeline(orig_image: np.ndarray, stages: List[Stage]) -> np.ndarray:
+# ---------------------------------------------------------------------------
+# Chuẩn hóa tên phương pháp (chấp nhận cả khóa chuẩn lẫn tên mô tả cũ)
+# ---------------------------------------------------------------------------
+def _norm_denoise(method: str) -> str:
+    m = (method or "").lower().strip()
+    if m in DENOISE_METHODS:
+        return m
+    rules = [
+        (("contra", "điều hòa ngược"), "contraharmonic"),
+        (("harmonic", "điều hòa"), "harmonic"),
+        (("geometric", "hình học"), "geometric"),
+        (("alpha", "cắt tỉa"), "alpha_trimmed"),
+        (("k_nearest", "k-nearest", "gần nhất"), "k_nearest"),
+        (("gauss",), "gaussian"),
+        (("midpoint", "điểm giữa"), "midpoint"),
+        (("median", "trung vị"), "median"),
+        (("max", "cực đại"), "max"),
+        (("min", "cực tiểu"), "min"),
+        (("mean", "số học", "arithmetic"), "mean"),
+    ]
+    for keys, val in rules:
+        if any(k in m for k in keys):
+            return val
+    return "median"
+
+
+def _norm_contrast(method: str) -> str:
+    m = (method or "").lower().strip()
+    if m in CONTRAST_METHODS:
+        return m
+    if "equal" in m or "cân bằng" in m:
+        return "equalize"
+    if "stretch" in m or "kéo giãn" in m or "piecewise" in m or "từng đoạn" in m:
+        return "stretch"
+    if "log" in m:
+        return "log"
+    if "neg" in m or "âm bản" in m:
+        return "negative"
+    return "gamma"
+
+
+def _norm_sharpen(method: str) -> str:
+    m = (method or "").lower().strip()
+    if m in SHARPEN_METHODS:
+        return m
+    if "combined" in m or "kết hợp" in m:
+        return "combined"
+    if "4" in m:
+        return "laplacian_4"
+    return "laplacian_8"
+
+
+# ---------------------------------------------------------------------------
+# Từng bước
+# ---------------------------------------------------------------------------
+def apply_scratch(img: np.ndarray, params: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+    mask = detect_scratch_mask(
+        img,
+        sensitivity=params.get("sensitivity", 0.5),
+        polarity=params.get("polarity", "bright"),
+    )
+    if np.any(mask > 0):
+        img = fill_masked(img, mask, method=params.get("fill_method", "median"),
+                          kernel_size=params.get("kernel_size", 5))
+    return img, mask
+
+
+def apply_denoise(img: np.ndarray, method: str, params: Dict[str, Any]) -> np.ndarray:
+    m = _norm_denoise(method)
+    k = int(params.get("kernel_size", 3))
+    pad = params.get("pad_mode", "mirror")
+    if m == "median":
+        return median_filter(img, kernel_size=k, pad_mode=pad)
+    if m == "mean":
+        return arithmetic_mean_filter(img, kernel_size=k, pad_mode=pad)
+    if m == "gaussian":
+        return gaussian_filter(img, kernel_size=k, sigma=params.get("sigma", k / 3.0), pad_mode=pad)
+    if m == "alpha_trimmed":
+        d = int(params.get("d", max(2, (k * k) // 3)))
+        d = min(d, k * k - 1)
+        return alpha_trimmed_mean_filter(img, kernel_size=k, d=d, pad_mode=pad)
+    if m == "k_nearest":
+        return k_nearest_mean_filter(img, kernel_size=k, k=int(params.get("k", max(3, (k * k) // 2))), pad_mode=pad)
+    if m == "geometric":
+        return geometric_mean_filter(img, kernel_size=k, pad_mode=pad)
+    if m == "harmonic":
+        return harmonic_mean_filter(img, kernel_size=k, pad_mode=pad)
+    if m == "contraharmonic":
+        return contraharmonic_mean_filter(img, kernel_size=k, Q=params.get("Q", 1.5), pad_mode=pad)
+    if m == "midpoint":
+        return midpoint_filter(img, kernel_size=k, pad_mode=pad)
+    if m == "max":
+        return max_filter(img, kernel_size=k, pad_mode=pad)
+    if m == "min":
+        return min_filter(img, kernel_size=k, pad_mode=pad)
+    return median_filter(img, kernel_size=k, pad_mode=pad)
+
+
+def apply_contrast(img: np.ndarray, method: str, params: Dict[str, Any]) -> np.ndarray:
+    m = _norm_contrast(method)
+
+    def _on_channel(ch: np.ndarray) -> np.ndarray:
+        if m == "equalize":
+            return equalize_histogram(ch, method=params.get("eq_mode", "stretch_to_zero"))
+        if m == "stretch":
+            if "r1" in params and "r2" in params:
+                return piecewise_linear_transform(ch, params["r1"], params.get("s1", 0),
+                                                  params["r2"], params.get("s2", 255))
+            return auto_contrast_stretch(ch, clip_percent=params.get("clip", 1.0))
+        if m == "log":
+            return log_transform(ch)
+        if m == "negative":
+            return negative_transform(ch)
+        return gamma_transform(ch, gamma=params.get("gamma", 1.0))
+
+    if img.ndim == 3:
+        return process_color_on_intensity(img, _on_channel)
+    return _on_channel(img)
+
+
+def apply_sharpen(img: np.ndarray, method: str, params: Dict[str, Any]) -> np.ndarray:
+    m = _norm_sharpen(method)
+    k = float(params.get("k", 0.4))
+    if m == "combined":
+        return combined_sharpen(img, k_lap=k, gamma_val=params.get("gamma_val", 1.0))
+    mode = "4-neighbor" if m == "laplacian_4" else "8-neighbor"
+    return laplacian_sharpen(img, k=k, mode=mode, pad_mode=params.get("pad_mode", "mirror"))
+
+
+def run_pipeline(orig_image: np.ndarray, stages: List[Stage], return_steps: bool = False):
     """
-    Thực thi quy trình khôi phục ảnh tuần tự theo thứ tự cố định từ ảnh gốc.
-    
-    Tham số:
-        orig_image: Ảnh gốc ban đầu (uint8, 2D hoặc 3D).
-        stages: Danh sách các Stage điều khiển (denoise -> scratch -> contrast -> sharpen).
-        
+    Chạy các bước theo thứ tự cố định STAGE_ORDER, luôn bắt đầu từ ảnh gốc.
+
     Trả về:
-        Ảnh kết quả sau khi qua các bước được kích hoạt.
+        - return_steps=False: ảnh kết quả.
+        - return_steps=True: (ảnh kết quả, danh sách [(tên bước, ảnh sau bước)], mặt nạ vết xước hoặc None).
     """
     if orig_image is None or orig_image.size == 0:
-        return orig_image
+        return (orig_image, [], None) if return_steps else orig_image
 
     img = orig_image.copy()
     stage_map = {s.name: s for s in stages}
+    steps = []
+    scratch_mask = None
 
-    # ========================================================
-    # BƯỚC 1: KHỬ NHIỄU (Chương 2, slide 91-117, 133-141)
-    # ========================================================
-    s_denoise = stage_map.get("denoise")
-    if s_denoise and s_denoise.enabled:
-        method = s_denoise.method.lower()
-        k_size = s_denoise.params.get("kernel_size", 3)
-        pad_mode = s_denoise.params.get("pad_mode", "mirror")
-        
-        if "median" in method or "trung vị" in method:
-            img = median_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "arithmetic" in method or "số học" in method or "mean" == method:
-            img = arithmetic_mean_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "geometric" in method or "hình học" in method:
-            img = geometric_mean_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "harmonic" in method and "contra" not in method and "ngược" not in method:
-            img = harmonic_mean_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "contra" in method or "điều hòa ngược" in method:
-            Q = s_denoise.params.get("Q", 1.5)
-            img = contraharmonic_mean_filter(img, kernel_size=k_size, Q=Q, pad_mode=pad_mode)
-        elif "max" in method or "cực đại" in method:
-            img = max_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "min" in method or "cực tiểu" in method:
-            img = min_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "midpoint" in method or "điểm giữa" in method:
-            img = midpoint_filter(img, kernel_size=k_size, pad_mode=pad_mode)
-        elif "alpha" in method or "cắt tỉa" in method:
-            d = s_denoise.params.get("d", 2)
-            img = alpha_trimmed_mean_filter(img, kernel_size=k_size, d=d, pad_mode=pad_mode)
-        elif "k_nearest" in method or "gần nhất" in method:
-            k = s_denoise.params.get("k", 5)
-            img = k_nearest_mean_filter(img, kernel_size=k_size, k=k, pad_mode=pad_mode)
-        elif "gauss" in method:
-            sigma = s_denoise.params.get("sigma", 1.0)
-            img = gaussian_filter(img, kernel_size=k_size, sigma=sigma, pad_mode=pad_mode)
-        else:
-            img = median_filter(img, kernel_size=k_size, pad_mode=pad_mode)
+    for name in STAGE_ORDER:
+        st = stage_map.get(name)
+        if st is None or not st.enabled:
+            continue
+        if name == "scratch":
+            img, scratch_mask = apply_scratch(img, st.params)
+        elif name == "denoise":
+            img = apply_denoise(img, st.method, st.params)
+        elif name == "contrast":
+            img = apply_contrast(img, st.method, st.params)
+        elif name == "sharpen":
+            img = apply_sharpen(img, st.method, st.params)
+        if return_steps:
+            steps.append((name, img.copy()))
 
-    # ========================================================
-    # BƯỚC 2: GIẢM VẾT XƯỚC (Chương 6, 5, 2)
-    # ========================================================
-    s_scratch = stage_map.get("scratch")
-    if s_scratch and s_scratch.enabled:
-        sensitivity = s_scratch.params.get("sensitivity", 0.5)
-        fill_method = s_scratch.params.get("fill_method", "median")
-        kernel_size = s_scratch.params.get("kernel_size", 7)
-        
-        # 1. Phát hiện mặt nạ vết xước
-        mask = detect_scratch_mask(img, sensitivity=sensitivity, method="median_diff")
-        # 2. Điền vết xước bằng các điểm lành lặn lân cận ngoài mặt nạ
-        if np.any(mask > 0):
-            img = fill_masked(img, mask, method=fill_method, kernel_size=kernel_size)
-
-    # ========================================================
-    # BƯỚC 3: SÁNG VÀ TƯƠNG PHẢN (Chương 2, slide 43-78)
-    # Ảnh màu được chuyển sang HSI và chỉ xử lý trên kênh I
-    # ========================================================
-    s_contrast = stage_map.get("contrast")
-    if s_contrast and s_contrast.enabled:
-        method = s_contrast.method.lower()
-        
-        def _apply_contrast(channel):
-            if "equalize" in method or "cân bằng" in method:
-                mode = s_contrast.params.get("eq_mode", "stretch_to_zero")
-                return equalize_histogram(channel, method=mode)
-            elif "gamma" in method:
-                gamma = s_contrast.params.get("gamma", 0.85)
-                return gamma_transform(channel, gamma=gamma)
-            elif "log" in method:
-                return log_transform(channel)
-            elif "negative" in method or "âm bản" in method:
-                return negative_transform(channel)
-            elif "piecewise" in method or "từng đoạn" in method:
-                r1 = s_contrast.params.get("r1", 50)
-                s1 = s_contrast.params.get("s1", 20)
-                r2 = s_contrast.params.get("r2", 200)
-                s2 = s_contrast.params.get("s2", 230)
-                return piecewise_linear_transform(channel, r1, s1, r2, s2)
-            else:
-                gamma = s_contrast.params.get("gamma", 0.85)
-                return gamma_transform(channel, gamma=gamma)
-                
-        # Nếu là ảnh màu thì áp dụng quy trình HSI
-        if img.ndim == 3:
-            img = process_color_on_intensity(img, _apply_contrast)
-        else:
-            img = _apply_contrast(img)
-
-    # ========================================================
-    # BƯỚC 4: LÀM NÉT (Chương 2, slide 119-123; Chương 6, slide 20-28, 58-60)
-    # ========================================================
-    s_sharpen = stage_map.get("sharpen")
-    if s_sharpen and s_sharpen.enabled:
-        method = s_sharpen.method.lower()
-        k = s_sharpen.params.get("k", 0.35)
-        
-        if "combined" in method or "kết hợp" in method:
-            gamma_val = s_sharpen.params.get("gamma_val", 0.85)
-            img = combined_sharpen(img, k_lap=k, gamma_val=gamma_val)
-        elif "4" in method or "4-neighbor" in method:
-            img = laplacian_sharpen(img, k=k, mode="4-neighbor", pad_mode="mirror")
-        else:
-            # Mặc định 8 lân cận
-            img = laplacian_sharpen(img, k=k, mode="8-neighbor", pad_mode="mirror")
-
+    if return_steps:
+        return img, steps, scratch_mask
     return img
 
 
+# ---------------------------------------------------------------------------
+# Chẩn đoán tự động
+# ---------------------------------------------------------------------------
+def _to_gray(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 3:
+        g = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
+        return np.clip(np.round(g), 0, 255).astype(np.uint8)
+    return image
+
+
+def analyze_image(image: np.ndarray) -> Dict[str, float]:
+    """
+    Đo các đặc trưng tổn hại của ảnh (dùng cho chẩn đoán và cho phần phân tích dữ liệu trong báo cáo).
+
+    - impulse_ratio: tỉ lệ điểm cực trị (<=5 hoặc >=250) lệch mạnh (>50) so với trung vị 3x3
+                     -> dấu hiệu nhiễu xung muối tiêu (Ch.2 tr.131).
+    - noise_sigma:   ước lượng độ lệch chuẩn nhiễu hạt = 1.4826 * MAD(ảnh - trung vị 3x3),
+                     chỉ tính trên các điểm không phải nhiễu xung.
+    - scratch_ratio: tỉ lệ điểm thuộc các vệt dạng đường (vết xước/nứt) trong mặt nạ.
+    - p1, p99, dynamic_range, mean: phân vị 1%/99%, độ rộng dải xám và độ sáng trung bình
+                     đo trên ảnh đã lọc trung vị (để nhiễu không làm sai lệch).
+    """
+    gray = _to_gray(image)
+    med3 = median_filter(gray, kernel_size=3)
+    resid = gray.astype(np.float32) - med3.astype(np.float32)
+    extreme = (gray <= 5) | (gray >= 250)
+    impulse = extreme & (np.abs(resid) > 50)
+    impulse_ratio = float(np.mean(impulse))
+
+    r = resid[~impulse]
+    if r.size > 0:
+        noise_sigma = float(1.4826 * np.median(np.abs(r - np.median(r))))
+    else:
+        noise_sigma = 0.0
+
+    # Chỉ đếm thành phần dạng đường (max_speck=0) để đốm nhiễu muối tiêu không bị tính là vết xước
+    mask = detect_scratch_mask(image, sensitivity=0.5, max_speck=0)
+    scratch_ratio = float(np.mean(mask > 0))
+
+    p1, p99 = percentile_range(med3, 1.0)
+    return {
+        "impulse_ratio": impulse_ratio,
+        "noise_sigma": noise_sigma,
+        "scratch_ratio": scratch_ratio,
+        "p1": float(p1),
+        "p99": float(p99),
+        "dynamic_range": float(p99 - p1),
+        "mean": float(np.mean(med3)),
+    }
+
+
+# Ngưỡng của luật chẩn đoán (đặt thành hằng số để dễ trình bày và thử nghiệm)
+TH_IMPULSE = 0.003        # > 0.3% điểm là nhiễu xung -> lọc trung vị
+TH_IMPULSE_HEAVY = 0.12   # > 12% -> trung vị 5x5
+TH_NOISE_SIGMA = 6.0      # sigma nhiễu hạt > 6 mức xám -> lọc Gauss / alpha-trimmed
+TH_SCRATCH = 0.002        # > 0.2% điểm thuộc vệt xước dạng đường -> bật bước vết xước
+TH_RANGE_LOW = 70         # dải xám (p99 - p1) < 70 -> cân bằng histogram
+TH_RANGE_OK = 180         # 70..180 -> kéo giãn tương phản
+TH_DARK = 80              # dải đủ rộng nhưng quá tối -> gamma < 1
+TH_BRIGHT = 175           # dải đủ rộng nhưng quá sáng -> gamma > 1
+
+
+def diagnose_with_report(image: np.ndarray) -> Tuple[List[Stage], List[str], Dict[str, float]]:
+    """
+    Chẩn đoán tổn hại và đề xuất cấu hình 4 bước, kèm lời giải thích cho từng quyết định.
+    Trả về (stages, report, stats).
+    """
+    stats = analyze_image(image)
+    report: List[str] = []
+
+    # 1. Vết xước
+    sc = stats["scratch_ratio"]
+    scratch_on = sc > TH_SCRATCH
+    scratch = Stage("scratch", scratch_on, "median_fill",
+                    {"sensitivity": 0.5, "polarity": "bright", "fill_method": "median", "kernel_size": 5})
+    report.append(
+        f"Vết xước: {sc * 100:.2f}% điểm ảnh "
+        + ("> 0.2% → bật phát hiện và điền vết." if scratch_on else "≤ 0.2% → bỏ qua.")
+    )
+
+    # 2. Khử nhiễu
+    imp, sig = stats["impulse_ratio"], stats["noise_sigma"]
+    if imp > TH_IMPULSE and sig > TH_NOISE_SIGMA:
+        denoise = Stage("denoise", True, "alpha_trimmed", {"kernel_size": 3, "d": 4, "pad_mode": "mirror"})
+        reason = (f"nhiễu xung {imp * 100:.2f}% và nhiễu hạt σ≈{sig:.1f} → lọc alpha-trimmed 3x3 "
+                  f"(bỏ 2 giá trị lớn nhất/nhỏ nhất rồi lấy trung bình).")
+    elif imp > TH_IMPULSE:
+        k = 5 if imp > TH_IMPULSE_HEAVY else 3
+        denoise = Stage("denoise", True, "median", {"kernel_size": k, "pad_mode": "mirror"})
+        reason = f"nhiễu xung {imp * 100:.2f}% > 0.3% → lọc trung vị {k}x{k}."
+    elif sig > TH_NOISE_SIGMA:
+        denoise = Stage("denoise", True, "gaussian", {"kernel_size": 5, "sigma": 1.0, "pad_mode": "mirror"})
+        reason = f"nhiễu hạt σ≈{sig:.1f} > 6 → lọc Gauss 5x5 (σ=1.0)."
+    else:
+        denoise = Stage("denoise", False, "median", {"kernel_size": 3, "pad_mode": "mirror"})
+        reason = f"nhiễu xung {imp * 100:.2f}%, nhiễu hạt σ≈{sig:.1f} đều thấp → bỏ qua."
+    report.append("Khử nhiễu: " + reason)
+
+    # 3. Sáng & tương phản
+    rng, mean = stats["dynamic_range"], stats["mean"]
+    if rng < TH_RANGE_LOW:
+        contrast = Stage("contrast", True, "equalize", {"eq_mode": "stretch_to_zero"})
+        reason = f"dải xám chỉ {rng:.0f} mức (< 70) → cân bằng histogram."
+    elif rng < TH_RANGE_OK:
+        contrast = Stage("contrast", True, "stretch", {"clip": 1.0})
+        reason = (f"dải xám {stats['p1']:.0f}–{stats['p99']:.0f} ({rng:.0f} mức) bị hẹp/bạc màu "
+                  f"→ kéo giãn tuyến tính về 0–255.")
+    elif mean < TH_DARK:
+        contrast = Stage("contrast", True, "gamma", {"gamma": 0.75})
+        reason = f"dải xám đủ rộng nhưng ảnh tối (trung bình {mean:.0f}) → gamma 0.75."
+    elif mean > TH_BRIGHT:
+        contrast = Stage("contrast", True, "gamma", {"gamma": 1.3})
+        reason = f"dải xám đủ rộng nhưng ảnh sáng (trung bình {mean:.0f}) → gamma 1.3."
+    else:
+        contrast = Stage("contrast", False, "stretch", {"clip": 1.0})
+        reason = f"dải xám {rng:.0f} mức, trung bình {mean:.0f} đã ổn → bỏ qua."
+    report.append("Tương phản: " + reason)
+
+    # 4. Làm nét: nhẹ, chỉ ở vùng biên (Laplacian có trọng số Sobel).
+    #    Ảnh nhiều nhiễu hạt thì không làm nét vì đạo hàm khuếch đại phần nhiễu còn sót (Ch.6 tr.29-31).
+    if sig > TH_NOISE_SIGMA:
+        sharpen = Stage("sharpen", False, "combined", {"k": 0.3})
+        report.append(f"Làm nét: bỏ qua vì ảnh còn nhiễu hạt (σ≈{sig:.1f}), đạo hàm sẽ khuếch đại nhiễu.")
+    else:
+        sharpen = Stage("sharpen", True, "combined", {"k": 0.3})
+        report.append("Làm nét: Laplacian có trọng số Sobel, k = 0.3 (chỉ tăng nét ở biên).")
+
+    return [scratch, denoise, contrast, sharpen], report, stats
+
+
 def diagnose(image: np.ndarray) -> List[Stage]:
-    """
-    Hàm chẩn đoán tự động tổn hại của ảnh (Chương 2, slide 58-62, 129).
-    Dựa trên các luật đơn giản và ngưỡng thực nghiệm:
-      1. Tỷ lệ điểm ảnh bằng 0 hoặc 255 cao (> 1.0%) -> Gợi ý nhiễu xung muối tiêu -> Bật Median 3x3.
-      2. Độ lệch chuẩn (std) hẹp (< 40) hoặc dải histogram hẹp -> Bật Cân bằng Histogram.
-      3. Mean quá tối (< 95) -> Bật Gamma < 1.0 (0.80).
-         Mean quá sáng (> 165) -> Bật Gamma > 1.0 (1.25).
-      4. Phát hiện vết xước/nứt trắng -> Bật Khử vết xước.
-      5. Làm nét viền nhẹ (4 lân cận, k=0.30) để hoàn thiện chi tiết.
-    """
+    """Giữ tương thích: chỉ trả về danh sách bước (xem diagnose_with_report để có lời giải thích)."""
     if image is None or image.size == 0:
         return [
-            Stage("denoise", enabled=True, method="median", params={"kernel_size": 3}),
-            Stage("scratch", enabled=False, method="median_fill", params={"sensitivity": 0.5}),
-            Stage("contrast", enabled=True, method="gamma", params={"gamma": 0.85}),
-            Stage("sharpen", enabled=True, method="laplacian_4", params={"k": 0.30})
+            Stage("scratch", False, "median_fill", {"sensitivity": 0.5}),
+            Stage("denoise", False, "median", {"kernel_size": 3}),
+            Stage("contrast", False, "stretch", {"clip": 1.0}),
+            Stage("sharpen", False, "combined", {"k": 0.4}),
         ]
-
-    if image.ndim == 3:
-        gray = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
-    else:
-        gray = image.astype(np.float64)
-
-    mean_val, std_val = float(np.mean(gray)), float(np.std(gray))
-    total_px = float(gray.size)
-
-    # 1. Tỷ lệ điểm cực trị (0 hoặc 255)
-    zeros_ratio = float(np.sum(gray <= 1)) / total_px
-    white_ratio = float(np.sum(gray >= 254)) / total_px
-    salt_pepper_ratio = zeros_ratio + white_ratio
-
-    has_salt_pepper = (salt_pepper_ratio > 0.008)
-    
-    # 2. Kiểm tra vết xước (vùng sáng tương phản đột ngột)
-    mask = detect_scratch_mask(image, sensitivity=0.5)
-    scratch_ratio = float(np.sum(mask > 0)) / total_px
-    has_scratches = (scratch_ratio > 0.005)
-
-    # Khởi tạo các stage
-    denoise_stage = Stage(
-        name="denoise",
-        enabled=True if has_salt_pepper else False,
-        method="median",
-        params={"kernel_size": 3, "pad_mode": "mirror"}
-    )
-
-    scratch_stage = Stage(
-        name="scratch",
-        enabled=True if has_scratches else False,
-        method="median_fill",
-        params={"sensitivity": 0.5, "fill_method": "median", "kernel_size": 7}
-    )
-
-    # Sáng và tương phản
-    contrast_stage = Stage(name="contrast", enabled=True)
-    if std_val < 38.0:
-        # Tương phản quá thấp, dải histogram hẹp -> Cân bằng Histogram
-        contrast_stage.method = "equalize_histogram"
-        contrast_stage.params = {"eq_mode": "stretch_to_zero"}
-    elif mean_val < 95.0:
-        # Ảnh bị tối -> Gamma < 1 để kéo sáng
-        contrast_stage.method = "gamma"
-        contrast_stage.params = {"gamma": 0.80}
-    elif mean_val > 165.0:
-        # Ảnh bị bạc màu / chói -> Gamma > 1 để làm đậm
-        contrast_stage.method = "gamma"
-        contrast_stage.params = {"gamma": 1.25}
-    else:
-        # Ảnh vừa phải -> Gamma nhẹ nhàng
-        contrast_stage.method = "gamma"
-        contrast_stage.params = {"gamma": 0.88}
-
-    # Làm nét
-    sharpen_stage = Stage(
-        name="sharpen",
-        enabled=True,
-        method="laplacian_4",
-        params={"k": 0.30, "pad_mode": "mirror"}
-    )
-
-    return [denoise_stage, scratch_stage, contrast_stage, sharpen_stage]
+    stages, _, _ = diagnose_with_report(image)
+    return stages

@@ -3,14 +3,21 @@ Module verify/compare_opencv.py
 Đối chứng nghiệm thu giữa thuật toán NumPy (tự lập trình từ đầu) và thư viện OpenCV C++ (Chương 0, slide 10).
 THƯ VIỆN cv2 CHỈ ĐƯỢC PHÉP IMPORT Ở ĐÂY VÀ TRONG BÀI KIỂM THỬ ĐỐI CHỨNG.
 """
+import os
+import sys
 import time
 from typing import Dict, Any, List
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import numpy as np
 import cv2
 
 from core.denoise import median_filter, arithmetic_mean_filter, gaussian_filter
 from core.histogram import equalize_histogram
-from core.sharpen import laplacian_sharpen, LAPLACIAN_8_NEIGHBOR
+from core.sharpen import laplacian_sharpen, sobel_filter, LAPLACIAN_8_NEIGHBOR
 from core.morphology import dilate, erode
 from core.scratch import otsu_threshold
 from core.metrics import calculate_rms_error, calculate_psnr
@@ -114,6 +121,17 @@ def compare_operation(image: np.ndarray, op_name: str, **kwargs) -> Dict[str, An
         cv_out = cv2.erode(gray, kernel, borderType=cv2.BORDER_REPLICATE)
         t3 = time.perf_counter()
         
+    elif op_name == "sobel":
+        t0 = time.perf_counter()
+        my_out = sobel_filter(gray, pad_mode="mirror")
+        t1 = time.perf_counter()
+
+        t2 = time.perf_counter()
+        gx = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3, borderType=cv2.BORDER_REFLECT_101)
+        gy = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3, borderType=cv2.BORDER_REFLECT_101)
+        cv_out = np.clip(np.round(np.abs(gx) + np.abs(gy)), 0, 255).astype(np.uint8)
+        t3 = time.perf_counter()
+
     elif op_name == "otsu":
         t0 = time.perf_counter()
         th_my = otsu_threshold(gray)
@@ -154,9 +172,38 @@ def run_full_benchmark(image: np.ndarray = None) -> List[Dict[str, Any]]:
         np.random.seed(42)
         image = np.random.randint(0, 256, (256, 256), dtype=np.uint8)
         
-    ops = ["median", "mean", "gaussian", "equalize_hist", "laplacian", "dilate", "erode", "otsu"]
+    ops = ["median", "mean", "gaussian", "equalize_hist", "laplacian", "sobel", "dilate", "erode", "otsu"]
     reports = []
     for op in ops:
         res = compare_operation(image, op)
         reports.append(res)
     return reports
+
+
+def main() -> int:
+    """In bảng đối chứng; trả về 0 nếu mọi phép đều khớp (e_rms <= 1)."""
+    sample = os.path.join(ROOT_DIR, "data", "old", "vietnam_vintage_portrait.jpg")
+    image = None
+    if os.path.exists(sample):
+        bgr = cv2.imdecode(np.fromfile(sample, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        image = bgr
+    src = "ảnh mẫu vietnam_vintage_portrait.jpg" if image is not None else "ảnh ngẫu nhiên 256x256"
+    reports = run_full_benchmark(image)
+
+    print(f"Đối chứng NumPy (tự cài đặt) với OpenCV trên {src}")
+    print("-" * 78)
+    print(f"{'Phép toán':<16}{'NumPy (ms)':>12}{'OpenCV (ms)':>13}{'e_rms':>10}  Kết luận")
+    print("-" * 78)
+    all_ok = True
+    for r in reports:
+        all_ok &= bool(r["passed"])
+        print(f"{r['operation']:<16}{r['numpy_time_ms']:>12.2f}{r['opencv_time_ms']:>13.2f}"
+              f"{r['e_rms']:>10.4f}  {'KHỚP' if r['passed'] else 'LỆCH'}"
+              + (f"  ({r['note']})" if r.get("note") else ""))
+    print("-" * 78)
+    print("Tất cả khớp với OpenCV." if all_ok else "CÓ PHÉP TOÁN LỆCH SO VỚI OPENCV!")
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -73,6 +73,10 @@ def equalize_histogram(image: np.ndarray, method: str = "stretch_to_zero") -> np
 
     if image.ndim == 2:
         return _equalize_channel(image)
+    elif image.ndim == 3:
+        # Chuẩn giáo trình Chương 3 tr.53: Cân bằng ảnh màu qua kênh I trong không gian HSI
+        # để không làm lệch sắc độ màu gốc
+        from core.color import process_color_on_intensity
+        return process_color_on_intensity(image, lambda ch: _equalize_channel(ch))
     else:
-        channels = [_equalize_channel(image[..., c]) for c in range(image.shape[2])]
-        return np.stack(channels, axis=-1)
+        raise ValueError(f"Kích thước mảng ảnh không hợp lệ: {image.ndim}D")

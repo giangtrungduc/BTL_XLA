@@ -11,6 +11,7 @@ Bao gồm:
   5. Connected Components (Phân tích thành phần liên thông 8 lân cận) - Slide tr.64-70
 """
 from typing import Tuple, List
+from collections import deque
 import numpy as np
 from core.window import get_sliding_windows
 
@@ -98,16 +99,13 @@ def connected_components(
         if visited[start_y, start_x]:
             continue
             
-        # Bắt đầu BFS cho 1 thành phần liên thông mới
-        queue = [(start_y, start_x)]
+        # Bắt đầu BFS cho 1 thành phần liên thông mới (dùng deque O(1) popleft)
+        queue = deque([(start_y, start_x)])
         visited[start_y, start_x] = True
         component_pixels = [(start_y, start_x)]
         
-        idx = 0
-        while idx < len(queue):
-            cy, cx = queue[idx]
-            idx += 1
-            
+        while queue:
+            cy, cx = queue.popleft()
             for dy, dx in neighbors:
                 ny, nx = cy + dy, cx + dx
                 if 0 <= ny < h and 0 <= nx < w:
@@ -119,7 +117,47 @@ def connected_components(
         size = len(component_pixels)
         if size >= min_size and (max_size is None or size <= max_size):
             num_components += 1
-            for py, px in component_pixels:
-                filtered_mask[py, px] = 255
+            pts = np.array(component_pixels)
+            filtered_mask[pts[:, 0], pts[:, 1]] = 255
                 
     return filtered_mask, num_components
+
+
+def label_components(binary_mask: np.ndarray):
+    """
+    Gán nhãn thành phần liên thông 8 lân cận bằng BFS (Chương 5, slide 64-70).
+
+    Trả về:
+        labels: Mảng int32 (H, W), 0 là nền, 1..N là nhãn thành phần.
+        stats: Danh sách N bộ (size, y_min, x_min, y_max, x_max) theo thứ tự nhãn.
+    """
+    h, w = binary_mask.shape[:2]
+    fg = binary_mask > 0
+    labels = np.zeros((h, w), dtype=np.int32)
+    stats = []
+    neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    current = 0
+    ys, xs = np.nonzero(fg)
+    for sy, sx in zip(ys.tolist(), xs.tolist()):
+        if labels[sy, sx] != 0:
+            continue
+        current += 1
+        labels[sy, sx] = current
+        queue = deque([(sy, sx)])
+        size = 0
+        y0 = y1 = sy
+        x0 = x1 = sx
+        while queue:
+            cy, cx = queue.popleft()
+            size += 1
+            if cy < y0: y0 = cy
+            if cy > y1: y1 = cy
+            if cx < x0: x0 = cx
+            if cx > x1: x1 = cx
+            for dy, dx in neighbors:
+                ny, nx = cy + dy, cx + dx
+                if 0 <= ny < h and 0 <= nx < w and fg[ny, nx] and labels[ny, nx] == 0:
+                    labels[ny, nx] = current
+                    queue.append((ny, nx))
+        stats.append((size, y0, x0, y1, x1))
+    return labels, stats

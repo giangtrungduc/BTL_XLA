@@ -17,7 +17,7 @@ Bao gồm:
  11. Gaussian Filter (Lọc thông thấp Gauss) - Slide tr.106
 """
 import numpy as np
-from core.window import get_sliding_windows
+from core.window import get_sliding_windows, convolve2d
 
 
 def _apply_op(image: np.ndarray, op_2d_fn) -> np.ndarray:
@@ -49,9 +49,10 @@ def arithmetic_mean_filter(image: np.ndarray, kernel_size: int = 3, pad_mode: st
     Bộ lọc trung bình số học: f_hat(x, y) = (1 / mn) * sum_{(s,t) in S_xy} f(s, t).
     Làm mịn đều tổng thể ảnh, khử nhiễu Gauss và nhiễu đều.
     """
+    box = np.full((kernel_size, kernel_size), 1.0 / (kernel_size * kernel_size), dtype=np.float32)
+
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32), kernel_size, pad_mode)
-        mean = np.mean(win, axis=(-2, -1))
+        mean = convolve2d(ch, box, pad_mode)
         return np.clip(np.round(mean), 0, 255).astype(np.uint8)
         
     return _apply_op(image, _op)
@@ -67,10 +68,11 @@ def geometric_mean_filter(image: np.ndarray, kernel_size: int = 3, pad_mode: str
     eps = 1e-5
     mn = float(kernel_size * kernel_size)
 
+    ones = np.ones((kernel_size, kernel_size), dtype=np.float32)
+
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32) + eps, kernel_size, pad_mode)
-        log_sum = np.sum(np.log(win), axis=(-2, -1))
-        geo_mean = np.exp(log_sum / mn) - eps
+        log_sum = convolve2d(np.log(ch.astype(np.float32) + eps), ones, pad_mode)
+        geo_mean = np.exp(log_sum / mn)
         return np.clip(np.round(geo_mean), 0, 255).astype(np.uint8)
 
     return _apply_op(image, _op)
@@ -85,10 +87,11 @@ def harmonic_mean_filter(image: np.ndarray, kernel_size: int = 3, pad_mode: str 
     eps = 1e-4
     mn = float(kernel_size * kernel_size)
 
+    ones = np.ones((kernel_size, kernel_size), dtype=np.float32)
+
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32) + eps, kernel_size, pad_mode)
-        inv_sum = np.sum(1.0 / win, axis=(-2, -1))
-        har_mean = mn / (inv_sum + 1e-8) - eps
+        inv_sum = convolve2d(1.0 / (ch.astype(np.float32) + eps), ones, pad_mode)
+        har_mean = mn / (inv_sum + 1e-8)
         return np.clip(np.round(har_mean), 0, 255).astype(np.uint8)
 
     return _apply_op(image, _op)
@@ -110,11 +113,14 @@ def contraharmonic_mean_filter(
     """
     eps = 1e-4
 
+    ones = np.ones((kernel_size, kernel_size), dtype=np.float32)
+
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32) + eps, kernel_size, pad_mode)
-        num = np.sum(np.power(win, Q + 1.0), axis=(-2, -1))
-        denom = np.sum(np.power(win, Q), axis=(-2, -1)) + 1e-8
-        res = (num / denom) - eps
+        # Chuẩn hóa về [0, 1] trước khi lũy thừa để tránh tràn số khi Q lớn
+        f = ch.astype(np.float64) / 255.0 + eps
+        num = convolve2d(np.power(f, Q + 1.0), ones, pad_mode).astype(np.float64)
+        denom = convolve2d(np.power(f, Q), ones, pad_mode).astype(np.float64) + 1e-12
+        res = num / denom * 255.0
         return np.clip(np.round(res), 0, 255).astype(np.uint8)
 
     return _apply_op(image, _op)
@@ -244,8 +250,7 @@ def gaussian_filter(
     kernel = create_gaussian_kernel(kernel_size, sigma)
 
     def _op(ch):
-        win = get_sliding_windows(ch.astype(np.float32), kernel_size, pad_mode)
-        conv = np.sum(win * kernel, axis=(-2, -1))
+        conv = convolve2d(ch, kernel, pad_mode)
         return np.clip(np.round(conv), 0, 255).astype(np.uint8)
 
     return _apply_op(image, _op)

@@ -77,3 +77,26 @@ def piecewise_linear_transform(
         
     lut_uint8 = np.clip(np.round(lut), 0, 255).astype(np.uint8)
     return lut_uint8[image]
+
+
+def auto_contrast_stretch(image: np.ndarray, clip_percent: float = 1.0) -> np.ndarray:
+    """
+    Kéo giãn tương phản tự động (Contrast Stretching, Chương 2, slide 47-50).
+    Chọn r1 = phân vị clip_percent% và r2 = phân vị (100 - clip_percent)% của histogram,
+    rồi ánh xạ tuyến tính [r1, r2] -> [0, 255] bằng piecewise_linear_transform.
+    Bỏ qua clip_percent% điểm tối nhất/sáng nhất để vài điểm nhiễu không làm hỏng phép kéo giãn.
+    """
+    r1, r2 = percentile_range(image, clip_percent)
+    if r2 - r1 < 2:
+        return image.copy()
+    return piecewise_linear_transform(image, r1=r1, s1=0, r2=r2, s2=255)
+
+
+def percentile_range(image: np.ndarray, clip_percent: float = 1.0):
+    """Tìm (r1, r2) là phân vị clip% và (100-clip)% từ histogram tích lũy của ảnh xám uint8."""
+    h = np.bincount(image.ravel(), minlength=256).astype(np.float64)
+    cdf = np.cumsum(h) / max(1.0, h.sum())
+    p = max(0.0, min(float(clip_percent), 20.0)) / 100.0
+    r1 = int(np.searchsorted(cdf, p, side="left"))
+    r2 = int(np.searchsorted(cdf, 1.0 - p, side="left"))
+    return max(0, min(r1, 255)), max(0, min(r2, 255))

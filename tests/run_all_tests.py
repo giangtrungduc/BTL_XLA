@@ -32,7 +32,7 @@ for s in scripts:
 
 print("======================================================================")
 if all_passed:
-    print("   ✓✓✓ 100% CÁC BÀI KIỂM THỬ ĐÃ THÀNH CÔNG RỰC RỠ! ✓✓✓")
+    print("   TẤT CẢ BÀI KIỂM THỬ ĐỀU ĐẠT")
 else:
     print("   CÓ LỖI XẢY RA TRONG MỘT SỐ BÀI KIỂM THỬ!")
 print("======================================================================")
